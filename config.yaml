@@ -14,11 +14,11 @@ providers:
       failure_threshold: 5
 
 timeouts:
-  silent_hang_deadline_ms: 4500
+  silent_hang_deadline_ms: 1000
 
 reconciliation:
   interval: 1h
-  drift_threshold_pct: 4.2
+  drift_threshold_pct: 1.12
 
 rate_limit:
   window_s: 60
@@ -32,4 +32,3 @@ auth:
 
 shutdown:
   drain_timeout_s: 30
-

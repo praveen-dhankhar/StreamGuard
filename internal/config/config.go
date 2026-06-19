@@ -88,8 +88,8 @@ func Load(path string) (Config, error) {
 func Defaults() Config {
 	return Config{
 		CircuitBreaker: BreakerConfig{FailureThreshold: 3, OpenTimeoutSeconds: 30, HalfOpenSuccessThreshold: 1},
-		Timeouts:       Timeouts{SilentHangDeadlineMS: 4500},
-		Reconciliation: Reconciliation{Interval: time.Hour, DriftThresholdPct: 4.2},
+		Timeouts:       Timeouts{SilentHangDeadlineMS: 1000},
+		Reconciliation: Reconciliation{Interval: time.Hour, DriftThresholdPct: 1.12},
 		RateLimit:      RateLimit{WindowSeconds: 60, MaxTokens: 1000000},
 		Budget:         Budget{DefaultPeriod: 24 * time.Hour},
 		Auth:           Auth{KeysFile: "./keys.yaml"},
