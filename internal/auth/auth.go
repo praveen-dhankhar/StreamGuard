@@ -107,7 +107,8 @@ func (s *Store) LoadKeysFile(path string) error {
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "- "))
+		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimPrefix(line, "- ")
 		if line == "" || strings.HasPrefix(line, "#") || line == "keys:" {
 			continue
 		}
