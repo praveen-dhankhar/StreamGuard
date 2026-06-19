@@ -263,14 +263,20 @@ StreamGuard intentionally tracks separate counters:
 
 ## Calibration
 
-The current default config keeps these bootstrap values:
+The default config now reflects a measured mock-harness calibration pass:
 
 | Setting | Current value | Status |
 |---|---:|---|
-| `timeouts.silent_hang_deadline_ms` | `4500` | Bootstrap value; calibration logger records inter-token gaps. |
-| `reconciliation.drift_threshold_pct` | `4.2` | Bootstrap value; reconciliation pushes drift samples. |
+| `timeouts.silent_hang_deadline_ms` | `1000` | Derived from a 120-stream chaos run: raw `P99 * 5 = 15ms`, clamped to the required `1000ms` floor. |
+| `reconciliation.drift_threshold_pct` | `1.12` | Derived from the same run: raw `P95 drift = 1.1164%`, no clamp applied. |
 
-A production calibration pass must collect at least `1,000` `inter_token_gap` samples and `100` `drift` samples from mock-harness or production-like traffic before replacing these values.
+Calibration evidence from `STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_enabled ./chaos -run TestHarnessRunsConcurrentChaosLoad -count=1 -v`:
+
+- `120` concurrent streams
+- `1160` `inter_token_gap` samples
+- `120` `drift` samples
+- failure coverage across `dead_socket`, `silent_hang`, and `malformed`
+- expected billed tokens `904`, actual ledger total `904`
 
 ## Architectural Notes
 
@@ -310,17 +316,17 @@ A production calibration pass must collect at least `1,000` `inter_token_gap` sa
 ## Known Limitations
 
 - State is in process only; restart loses breaker, ledger, and budget runtime state.
-- Token counting uses the local chunk or word counter for the mock harness path. Real provider tokenizer packages are not vendored in this repo.
-- Calibration values remain bootstrap values until a full sample-count calibration run replaces them.
-- Reconciliation is implemented as an idempotent job primitive, not as a long-running scheduler loop.
-- Graceful shutdown uses `http.Server.Shutdown`; forced-close partial ledger recording is not separately implemented.
+- The mock harness uses a deterministic chunk counter path by design; runtime OpenAI counting uses `tiktoken-go`, while Anthropic counting currently uses a pinned local fallback encoding rather than a live count-tokens integration.
+- Calibration values were bootstrapped from the mock chaos harness, not production traffic. Recalibrate against real traffic before production rollout.
+- Reconciliation is batch and in memory. It is scheduled in-process and remains single-instance only.
+- Forced shutdown records partial final-attempt billing and truncation in the in-memory ledger, but does not emit a distinct shutdown-specific SSE reason.
 - Mid-stream provider swaps are visible to the user by design.
 - Rate limiting is admission-only.
 - A failover across providers forwards the original `model` field unchanged.
 
 ## Roadmap
 
-- Integrate real provider tokenizer implementations into the runtime path.
+- Add opt-in Anthropic live token-count verification to replace the current fallback strategy.
 - Add persistent ledger state for restart-safe usage reporting.
 - Support distributed circuit-breaker state across multiple proxy replicas.
 - Add production calibration tooling for timeout and drift-threshold derivation.
@@ -354,4 +360,16 @@ go test -tags chaos_enabled ./...
 STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_enabled ./...
 ```
 
-Default builds exclude the `chaos` package from the final binary.
+Measured chaos and calibration run:
+
+```sh
+STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_enabled ./chaos -run TestHarnessRunsConcurrentChaosLoad -count=1 -v
+```
+
+Default builds exclude the `chaos` package from the final binary:
+
+```sh
+tmpbin=$(mktemp /tmp/streamguard.XXXXXX)
+go build -o "$tmpbin" ./cmd/streamguard
+! go tool nm "$tmpbin" | grep -qi 'streamguard/chaos'
+```
