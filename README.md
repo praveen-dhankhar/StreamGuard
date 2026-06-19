@@ -56,29 +56,77 @@ stateDiagram-v2
 ## Project Structure
 
 ```mermaid
-flowchart TD
+flowchart TB
     Root["streamguard/"]
-    Root --> Cmd["cmd/streamguard<br/>server entrypoint"]
-    Root --> Internal["internal/"]
-    Root --> ClientRef["client-ref/<br/>CLI reference client"]
-    Root --> Chaos["chaos/<br/>build-tag gated harness"]
-    Root --> Config["config.yaml<br/>runtime configuration"]
-    Root --> Keys["keys.yaml<br/>API key seed data"]
 
-    Internal --> Auth["auth<br/>key validation and redaction"]
-    Internal --> Breaker["breaker<br/>per-provider circuit state"]
-    Internal --> Budget["budget<br/>atomic budget reservation"]
-    Internal --> Calibration["calibration<br/>sample collection and percentiles"]
-    Internal --> Cascade["cascade<br/>request session model"]
-    Internal --> Cfg["config<br/>load and validate settings"]
-    Internal --> Ledger["ledger<br/>usage totals and aggregation"]
-    Internal --> Mock["mockupstream<br/>deterministic SSE test providers"]
-    Internal --> Parser["parser<br/>frame reassembly and failure detection"]
-    Internal --> Protocol["protocol<br/>gateway SSE event types"]
-    Internal --> RateLimit["ratelimit<br/>admission-time token window"]
-    Internal --> Reconcile["reconcile<br/>drift application job"]
-    Internal --> Server["server<br/>HTTP handlers and proxy path"]
-    Internal --> Tokenizer["tokenizer<br/>local token counting registry"]
+    Root --> Runtime
+    Root --> Support
+    Root --> Docs
+
+    subgraph Runtime["Runtime Surfaces"]
+        direction TB
+        Cmd["cmd/streamguard<br/>proxy entrypoint"]
+        ClientRef["client-ref<br/>CLI reference client"]
+        Config["config.yaml<br/>runtime settings"]
+        Keys["keys.yaml<br/>API key seed data"]
+    end
+
+    subgraph Support["Internal Packages"]
+        direction LR
+
+        subgraph RequestPath["Request Path"]
+            direction TB
+            Server["server<br/>HTTP handlers and streaming path"]
+            Auth["auth<br/>key validation and redaction"]
+            Budget["budget<br/>atomic token reservation"]
+            RateLimit["ratelimit<br/>admission-time token window"]
+            Breaker["breaker<br/>per-provider circuit state"]
+            Parser["parser<br/>frame reassembly and failure detection"]
+            Protocol["protocol<br/>gateway SSE event types"]
+            Cascade["cascade<br/>request session model"]
+        end
+
+        subgraph Accounting["Accounting and Drift"]
+            direction TB
+            Ledger["ledger<br/>usage totals and aggregation"]
+            Reconcile["reconcile<br/>drift application job"]
+            Calibration["calibration<br/>sample collection and percentiles"]
+            Tokenizer["tokenizer<br/>local token counting registry"]
+        end
+
+        subgraph DevInfra["Test and Config Infrastructure"]
+            direction TB
+            Cfg["config<br/>load and validate settings"]
+            Mock["mockupstream<br/>deterministic SSE test providers"]
+            Chaos["chaos<br/>build-tag gated harness"]
+        end
+    end
+
+    subgraph Docs["Specifications"]
+        direction TB
+        SpecA["streamguard-prd.md"]
+        SpecB["streamguard-trd.md"]
+        SpecC["streamguard-app-flow.md"]
+        SpecD["streamguard-backend-schema.md"]
+    end
+
+    Cmd --> Server
+    ClientRef --> Protocol
+    Config --> Cfg
+    Keys --> Auth
+    Server --> Auth
+    Server --> Breaker
+    Server --> Parser
+    Server --> Protocol
+    Server --> Ledger
+    Server --> Calibration
+    Server --> Cascade
+    Auth --> Budget
+    Auth --> RateLimit
+    Reconcile --> Ledger
+    Reconcile --> Calibration
+    Reconcile --> Tokenizer
+    Mock --> Server
 ```
 
 ## Core Capabilities
