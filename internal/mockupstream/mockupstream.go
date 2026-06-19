@@ -3,10 +3,12 @@ package mockupstream
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +34,7 @@ type Options struct {
 	SplitFrames      bool
 	UsageOffsetPct   float64
 	RandomFailurePct int
+	PerModel         map[string]Options
 }
 
 type Server struct {
@@ -94,8 +97,9 @@ func (s *Server) SetOptions(opts Options) {
 
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-StreamGuard-Tokenizer", "mock-chunk-v1")
 	flusher, _ := w.(http.Flusher)
-	opts := s.snapshot()
+	opts := s.snapshot(r)
 	random := rand.New(rand.NewSource(time.Now().UnixNano()))
 	failure := opts.Failure
 	if failure == FailureNone && opts.RandomFailurePct > 0 && random.Intn(100) < opts.RandomFailurePct {
@@ -127,7 +131,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
 	s.mu.Lock()
-	s.usage[time.Now().UTC().Truncate(time.Hour).Format(time.RFC3339)+"/1h"] += len(opts.Tokens)
+	period := time.Now().UTC().Truncate(time.Hour).Format(time.RFC3339) + "/" + time.Hour.String()
+	keyHash := r.Header.Get("X-StreamGuard-Key-Hash")
+	if keyHash == "" {
+		keyHash = "default"
+	}
+	s.usage[usageKey(period, keyHash)] += len(opts.Tokens)
 	s.mu.Unlock()
 }
 
@@ -156,18 +165,36 @@ func injectFailure(w http.ResponseWriter, r *http.Request, flusher http.Flusher,
 
 func (s *Server) usageHandler(w http.ResponseWriter, r *http.Request) {
 	period := r.URL.Query().Get("period")
+	keyHash := r.URL.Query().Get("key")
 	s.mu.Lock()
-	trueCount := s.usage[period]
+	trueCount := s.usage[usageKey(period, keyHash)]
+	if keyHash == "" {
+		trueCount = 0
+		for k, v := range s.usage {
+			if strings.HasPrefix(k, period+"|") {
+				trueCount += v
+			}
+		}
+	}
 	offset := s.opts.UsageOffsetPct
 	s.mu.Unlock()
 	reported := trueCount + int(float64(trueCount)*(offset/100))
 	_ = json.NewEncoder(w).Encode(map[string]any{"period": period, "tokens": reported})
 }
 
-func (s *Server) snapshot() Options {
+func (s *Server) snapshot(r *http.Request) Options {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.opts
+	opts := s.opts
+	model, ok := requestModel(r)
+	if !ok || len(opts.PerModel) == 0 {
+		return opts
+	}
+	override, ok := opts.PerModel[model]
+	if !ok {
+		return opts
+	}
+	return mergeOptions(opts, override)
 }
 
 func (o Options) delay(r *rand.Rand) time.Duration {
@@ -199,4 +226,46 @@ func writeSplit(w http.ResponseWriter, text string) error {
 	time.Sleep(5 * time.Millisecond)
 	_, err := w.Write([]byte(payload[mid:] + "\n\n"))
 	return err
+}
+
+func usageKey(period, keyHash string) string {
+	return period + "|" + keyHash
+}
+
+func requestModel(r *http.Request) (string, bool) {
+	if r.Body == nil {
+		return "", false
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", false
+	}
+	r.Body = io.NopCloser(strings.NewReader(string(body)))
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.Model == "" {
+		return "", false
+	}
+	return payload.Model, true
+}
+
+func mergeOptions(base, override Options) Options {
+	merged := override
+	if merged.Provider == "" {
+		merged.Provider = base.Provider
+	}
+	if len(merged.Tokens) == 0 {
+		merged.Tokens = base.Tokens
+	}
+	if merged.DelayMin <= 0 {
+		merged.DelayMin = base.DelayMin
+	}
+	if merged.DelayMax < merged.DelayMin {
+		merged.DelayMax = merged.DelayMin
+	}
+	if merged.UsageOffsetPct == 0 {
+		merged.UsageOffsetPct = base.UsageOffsetPct
+	}
+	return merged
 }
