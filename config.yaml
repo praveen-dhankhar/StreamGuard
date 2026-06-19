@@ -1,0 +1,35 @@
+circuit_breaker:
+  failure_threshold: 3
+  open_timeout_s: 30
+  half_open_success_threshold: 1
+
+providers:
+  - name: openai
+    priority: 0
+    base_url: http://127.0.0.1:9001
+  - name: anthropic
+    priority: 1
+    base_url: http://127.0.0.1:9002
+    circuit_breaker:
+      failure_threshold: 5
+
+timeouts:
+  silent_hang_deadline_ms: 4500
+
+reconciliation:
+  interval: 1h
+  drift_threshold_pct: 4.2
+
+rate_limit:
+  window_s: 60
+  max_tokens: 1000000
+
+budget:
+  default_period: 24h
+
+auth:
+  keys_file: ./keys.yaml
+
+shutdown:
+  drain_timeout_s: 30
+

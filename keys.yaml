@@ -1,0 +1,10 @@
+keys:
+  - key: sg_live_demo
+    provider_allowlist: [openai, anthropic]
+    token_budget: 10000
+    budget_period: 24h
+  - key: sg_live_tiny
+    provider_allowlist: [openai, anthropic]
+    token_budget: 3
+    budget_period: 24h
+
