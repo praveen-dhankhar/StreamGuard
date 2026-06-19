@@ -33,6 +33,54 @@ sequenceDiagram
     StreamGuard-->>Client: Stream completes successfully
 ```
 
+## App Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> Authenticating
+    Authenticating --> Rejected: 400 / 401 / 403 / 429
+    Authenticating --> SelectingProvider: auth + allowlist + budget pass
+    SelectingProvider --> Streaming: first attempted provider selected
+    SelectingProvider --> Truncated: all providers skipped or exhausted
+    Streaming --> Streaming: content chunk forwarded
+    Streaming --> FailoverPending: dead_socket / silent_hang / malformed
+    FailoverPending --> Streaming: next attempted provider selected
+    FailoverPending --> Truncated: provider list exhausted
+    Streaming --> Truncated: budget_exceeded
+    Streaming --> Complete: upstream finishes normally
+    Complete --> [*]
+    Truncated --> [*]
+    Rejected --> [*]
+```
+
+## Project Structure
+
+```mermaid
+flowchart TD
+    Root["streamguard/"]
+    Root --> Cmd["cmd/streamguard<br/>server entrypoint"]
+    Root --> Internal["internal/"]
+    Root --> ClientRef["client-ref/<br/>CLI reference client"]
+    Root --> Chaos["chaos/<br/>build-tag gated harness"]
+    Root --> Config["config.yaml<br/>runtime configuration"]
+    Root --> Keys["keys.yaml<br/>API key seed data"]
+
+    Internal --> Auth["auth<br/>key validation and redaction"]
+    Internal --> Breaker["breaker<br/>per-provider circuit state"]
+    Internal --> Budget["budget<br/>atomic budget reservation"]
+    Internal --> Calibration["calibration<br/>sample collection and percentiles"]
+    Internal --> Cascade["cascade<br/>request session model"]
+    Internal --> Cfg["config<br/>load and validate settings"]
+    Internal --> Ledger["ledger<br/>usage totals and aggregation"]
+    Internal --> Mock["mockupstream<br/>deterministic SSE test providers"]
+    Internal --> Parser["parser<br/>frame reassembly and failure detection"]
+    Internal --> Protocol["protocol<br/>gateway SSE event types"]
+    Internal --> RateLimit["ratelimit<br/>admission-time token window"]
+    Internal --> Reconcile["reconcile<br/>drift application job"]
+    Internal --> Server["server<br/>HTTP handlers and proxy path"]
+    Internal --> Tokenizer["tokenizer<br/>local token counting registry"]
+```
+
 ## Core Capabilities
 
 - `POST /v1/stream` proxies SSE traffic and replays the original request body byte-for-byte during failover.
