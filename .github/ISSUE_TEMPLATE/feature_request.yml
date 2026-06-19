@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose an enhancement to StreamGuard
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      placeholder: What operator or developer problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      placeholder: Describe the feature or behavior you want
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: What workarounds or other approaches exist today?
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      placeholder: Protocol impact, operational constraints, or related systems
