@@ -41,6 +41,23 @@ type Server struct {
 	usage map[string]int
 }
 
+func NewHandler(opts Options) http.Handler {
+	if opts.Provider == "" {
+		opts.Provider = "mock"
+	}
+	if len(opts.Tokens) == 0 {
+		opts.Tokens = []string{"hello ", "from ", opts.Provider}
+	}
+	if opts.DelayMin <= 0 {
+		opts.DelayMin = 50 * time.Millisecond
+	}
+	if opts.DelayMax < opts.DelayMin {
+		opts.DelayMax = opts.DelayMin + 100*time.Millisecond
+	}
+	s := &Server{opts: opts, usage: make(map[string]int)}
+	return s.handler()
+}
+
 func New(opts Options) *Server {
 	if opts.Provider == "" {
 		opts.Provider = "mock"
@@ -55,11 +72,15 @@ func New(opts Options) *Server {
 		opts.DelayMax = opts.DelayMin + 100*time.Millisecond
 	}
 	s := &Server{opts: opts, usage: make(map[string]int)}
+	s.Server = httptest.NewServer(s.handler())
+	return s
+}
+
+func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/stream", s.stream)
 	mux.HandleFunc("/usage", s.usageHandler)
-	s.Server = httptest.NewServer(mux)
-	return s
+	return mux
 }
 
 func (s *Server) SetOptions(opts Options) {
