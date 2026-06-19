@@ -5,15 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"streamguard/internal/auth"
 	"streamguard/internal/breaker"
 	"streamguard/internal/calibration"
+	"streamguard/internal/cascade"
 	"streamguard/internal/config"
 	"streamguard/internal/ledger"
 	"streamguard/internal/parser"
@@ -31,6 +35,19 @@ type Server struct {
 	tokenizer tokenizer.Counter
 	breakers  map[string]*breaker.ProviderCircuitState
 	client    *http.Client
+	registry  *tokenizer.Registry
+
+	sessionSeq atomic.Uint64
+	draining   atomic.Bool
+
+	mu      sync.Mutex
+	active  map[string]*activeSession
+	forceAt *time.Timer
+}
+
+type activeSession struct {
+	session *cascade.Session
+	cancel  context.CancelCauseFunc
 }
 
 type streamRequest struct {
@@ -41,6 +58,7 @@ type streamRequest struct {
 
 func New(cfg config.Config, keys *auth.Store) *Server {
 	breakers := make(map[string]*breaker.ProviderCircuitState)
+	registry := tokenizer.NewRegistry()
 	for _, p := range cfg.Providers {
 		breakers[p.Name] = breaker.New(cfg.BreakerConfigFor(p))
 	}
@@ -50,9 +68,11 @@ func New(cfg config.Config, keys *auth.Store) *Server {
 		ledger:    ledger.New(cfg.Reconciliation.Interval),
 		limit:     ratelimit.New(time.Duration(cfg.RateLimit.WindowSeconds)*time.Second, cfg.RateLimit.MaxTokens),
 		cal:       calibration.New(),
-		tokenizer: tokenizer.ChunkCounter{},
+		tokenizer: tokenizer.NewProviderAwareCounter(registry),
 		breakers:  breakers,
 		client:    &http.Client{},
+		registry:  registry,
+		active:    make(map[string]*activeSession),
 	}
 }
 
@@ -67,11 +87,36 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Calibration() *calibration.Logger { return s.cal }
 func (s *Server) Ledger() *ledger.Store            { return s.ledger }
+func (s *Server) TokenizerRegistry() *tokenizer.Registry {
+	return s.registry
+}
 func (s *Server) Breaker(name string) *breaker.ProviderCircuitState {
 	return s.breakers[name]
 }
 
+func (s *Server) ActiveSessions() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.active)
+}
+
+func (s *Server) BeginShutdown(timeout time.Duration) {
+	if !s.draining.CompareAndSwap(false, true) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.forceAt != nil {
+		s.forceAt.Stop()
+	}
+	s.forceAt = time.AfterFunc(timeout, s.forceCloseActive)
+}
+
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		writeError(w, http.StatusServiceUnavailable, "server_shutting_down", "server is draining in-flight streams")
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found")
 		return
@@ -109,6 +154,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "rate limit window is saturated")
 		return
 	}
+	active, streamCtx := s.registerSession(r.Context(), key.KeyHash)
+	defer s.releaseSession(active.session.ID)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -121,32 +168,59 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	truncated := false
 	truncatedReason := protocol.ReasonAllProvidersExhausted
 	attempted := 0
+	active.session.Status = cascade.StatusStreaming
 
 	for i, p := range providers {
 		br := s.breakers[p.Name]
-		if !br.AllowAttempt() {
-			continue
+		allowed := br.State() == breaker.Closed
+		if !allowed {
+			if br.State() == breaker.HalfOpen {
+				allowed = br.TryClaimProbe()
+			}
+			if !allowed {
+				continue
+			}
 		}
 		attempted++
+		attemptIndex := active.session.StartAttempt(p.Name, time.Now())
+		active.session.FinalProvider = p.Name
 		if !statusSent {
 			_ = protocol.WriteSSE(w, protocol.EventStatus, protocol.StatusData{State: "healthy", Provider: p.Name})
 			statusSent = true
 			flush(flusher)
 		}
-		result := s.runAttempt(r.Context(), w, flusher, body, p, key.KeyHash, key, &totalDelivered)
+		result := s.runAttempt(streamCtx, w, flusher, body, req.Model, p, key.KeyHash, key, &totalDelivered)
 		finalAttemptTokens = result.tokens
+		active.session.FinalAttemptTokens = result.tokens
 		if result.err == nil {
 			br.RecordSuccess()
-			s.ledger.RecordTerminal(key.KeyHash, time.Now(), finalAttemptTokens, false)
+			active.session.Status = cascade.StatusComplete
+			active.session.FinishAttempt(attemptIndex, "success", 0, time.Now())
+			s.ledger.RecordTerminal(key.KeyHash, p.Name, time.Now(), finalAttemptTokens, false)
+			return
+		}
+		if errors.Is(result.err, errForcedShutdown) {
+			active.session.Status = cascade.StatusShutdown
+			active.session.FinishAttempt(attemptIndex, "shutdown", result.tokens, time.Now())
+			log.Printf("forced_shutdown session=%s provider=%s tokens=%d", active.session.ID, p.Name, result.tokens)
+			s.ledger.RecordTerminal(key.KeyHash, p.Name, time.Now(), result.tokens, true)
+			return
+		}
+		if errors.Is(result.err, context.Canceled) {
+			active.session.FinishAttempt(attemptIndex, "client_cancelled", result.tokens, time.Now())
 			return
 		}
 		br.RecordFailure()
 		if errors.Is(result.err, errBudgetExceeded) {
 			truncated = true
 			truncatedReason = protocol.ReasonBudgetExceeded
+			active.session.Status = cascade.StatusTruncated
+			active.session.FinishAttempt(attemptIndex, "budget_exceeded", result.tokens, time.Now())
 			break
 		}
 		reason := classify(result.err)
+		active.session.Status = cascade.StatusFailover
+		active.session.FinishAttempt(attemptIndex, string(reason), result.tokens, time.Now())
 		if next, ok := nextAllowedProvider(providers, i+1, s.breakers); ok {
 			failovers++
 			_ = protocol.WriteSSE(w, protocol.EventFailover, protocol.FailoverData{
@@ -166,13 +240,14 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attempted == 0 || truncated {
+		active.session.Status = cascade.StatusTruncated
 		_ = protocol.WriteSSE(w, protocol.EventTruncated, protocol.TruncatedData{
 			Reason:          truncatedReason,
 			TokensDelivered: totalDelivered,
 			Final:           true,
 		})
 		flush(flusher)
-		s.ledger.RecordTerminal(key.KeyHash, time.Now(), finalAttemptTokens, true)
+		s.ledger.RecordTerminal(key.KeyHash, active.session.FinalProvider, time.Now(), finalAttemptTokens, true)
 	}
 }
 
@@ -182,28 +257,37 @@ type attemptResult struct {
 }
 
 var errBudgetExceeded = errors.New("budget_exceeded")
+var errForcedShutdown = errors.New("forced_shutdown")
 
-func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, body []byte, p config.Provider, keyHash string, key interface{ TryReserve(int64) bool }, total *int) attemptResult {
+func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, body []byte, model string, p config.Provider, keyHash string, key interface{ TryReserve(int64) bool }, total *int) attemptResult {
 	url := strings.TrimRight(p.BaseURL, "/") + "/v1/stream"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return attemptResult{err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-StreamGuard-Key-Hash", keyHash)
 	resp, err := s.client.Do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), errForcedShutdown) {
+			return attemptResult{err: errForcedShutdown}
+		}
 		return attemptResult{err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return attemptResult{err: parser.ErrMalformed}
 	}
+	tokenizerHint := resp.Header.Get("X-StreamGuard-Tokenizer")
 	pr := parser.NewReader(resp.Body, s.cal)
 	deadline := time.Duration(s.cfg.Timeouts.SilentHangDeadlineMS) * time.Millisecond
 	var attemptTokens int
 	for {
 		frame, err := pr.Next(ctx, deadline)
 		if err != nil {
+			if errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), errForcedShutdown) {
+				return attemptResult{tokens: attemptTokens, err: errForcedShutdown}
+			}
 			return attemptResult{tokens: attemptTokens, err: err}
 		}
 		if frame.Event == "done" {
@@ -212,7 +296,7 @@ func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher 
 		if frame.Event != "" {
 			continue
 		}
-		n := s.tokenizer.Count(p.Name, frame.Text)
+		n := s.tokenizer.Count(p.Name, model, tokenizerHint, frame.Text)
 		if n == 0 {
 			n = 1
 		}
@@ -320,5 +404,40 @@ func bearer(v string) (string, bool) {
 func flush(f http.Flusher) {
 	if f != nil {
 		f.Flush()
+	}
+}
+
+func (s *Server) registerSession(parent context.Context, apiKeyHash string) (*activeSession, context.Context) {
+	id := fmt.Sprintf("sg-%d", s.sessionSeq.Add(1))
+	ctx, cancel := context.WithCancelCause(parent)
+	active := &activeSession{
+		session: cascade.NewSession(id, apiKeyHash),
+		cancel:  cancel,
+	}
+	s.mu.Lock()
+	s.active[id] = active
+	s.mu.Unlock()
+	return active, ctx
+}
+
+func (s *Server) releaseSession(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.active, id)
+	if len(s.active) == 0 && s.forceAt != nil {
+		s.forceAt.Stop()
+		s.forceAt = nil
+	}
+}
+
+func (s *Server) forceCloseActive() {
+	s.mu.Lock()
+	sessions := make([]*activeSession, 0, len(s.active))
+	for _, session := range s.active {
+		sessions = append(sessions, session)
+	}
+	s.mu.Unlock()
+	for _, session := range sessions {
+		session.cancel(errForcedShutdown)
 	}
 }
