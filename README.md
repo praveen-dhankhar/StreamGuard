@@ -1,7 +1,7 @@
 [![CI](https://github.com/praveen-dhankhar/StreamGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/praveen-dhankhar/StreamGuard/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/praveen-dhankhar/StreamGuard)](https://goreportcard.com/report/github.com/praveen-dhankhar/StreamGuard)
 [![Go Version](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](https://go.dev/)
-[![License](https://img.shields.io/badge/License-Unspecified-lightgrey)](https://github.com/praveen-dhankhar/StreamGuard)
+[![License](https://img.shields.io/github/license/praveen-dhankhar/StreamGuard)](./LICENSE)
 
 # StreamGuard
 
