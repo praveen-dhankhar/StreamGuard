@@ -1,1 +1,6 @@
-request failed: 401 Unauthorized {"error":"invalid_api_key","message":"missing or invalid API key"}
+[STATUS] provider=openai state=healthy
+Primary provider starts well 
+[FAILOVER] failover 1: openai -> anthropic reason=dead_socket
+ retained partial remains visible; regenerated block starts below
+--- regenerated output ---
+Secondary provider replays the full request and finishes cleanly. 

@@ -136,6 +136,20 @@ flowchart TB
 - `GET /healthz` returns operator-only liveness and circuit-breaker state; `GET /livez` returns unauthenticated liveness only.
 - The reference client renders retained partial output, regeneration state, provider changes, and terminal truncation notices in a CLI surface.
 
+## Why StreamGuard
+
+- A naive reverse proxy leaves users with broken partial output when an upstream stream dies mid-response.
+- A hidden retry strategy obscures provider failover from the client and makes UI recovery semantics guesswork.
+- Incorrect accounting can bill failed generations that were later superseded by a healthy recovery path.
+
+## Quick Evaluation
+
+```sh
+go build ./...
+go test ./...
+OPERATOR_TOKEN=dev-operator-token go run ./cmd/streamguard
+```
+
 ## Prerequisites
 
 - Go `1.22+`
@@ -145,7 +159,7 @@ flowchart TB
 
 ## Installation / Running
 
-Build and start the proxy:
+Build from source and start the proxy:
 
 ```sh
 go build ./...
@@ -160,6 +174,14 @@ STREAMGUARD_ADDR=:9090 OPERATOR_TOKEN=dev-operator-token go run ./cmd/streamguar
 
 The committed `config.yaml` points at `http://127.0.0.1:9001` and `http://127.0.0.1:9002`.
 
+Release notes: [v1.0.1](./docs/releases/v1.0.1.md)
+
+## Demo Artifact
+
+The demo below is generated from the deterministic local failover path using `cmd/demo-upstreams`, the main proxy, and the reference client.
+
+![StreamGuard failover demo](./assets/demo-failover.gif)
+
 ## Example Usage
 
 Run the reference client against the local proxy:
@@ -167,6 +189,20 @@ Run the reference client against the local proxy:
 ```sh
 go run ./client-ref --endpoint http://localhost:8080/v1/stream --api-key sg_live_demo "hello"
 ```
+
+For the deterministic failover demo:
+
+```sh
+go run ./cmd/demo-upstreams
+OPERATOR_TOKEN=dev-operator-token go run ./cmd/streamguard
+go run ./client-ref --no-color --endpoint http://localhost:8080/v1/stream --api-key sg_live_demo "Explain failover behavior in one sentence"
+```
+
+## Use Cases
+
+- AI chat gateways that must preserve user-facing continuity during provider-side stream failures.
+- Internal platform proxying where authentication, budgeting, and provider routing need one consistent control point.
+- Cost- and budget-controlled multi-provider streaming where failed upstream attempts must not be billed as final output.
 
 ## HTTP API
 
@@ -281,6 +317,13 @@ A production calibration pass must collect at least `1,000` `inter_token_gap` sa
 - Mid-stream provider swaps are visible to the user by design.
 - Rate limiting is admission-only.
 - A failover across providers forwards the original `model` field unchanged.
+
+## Roadmap
+
+- Integrate real provider tokenizer implementations into the runtime path.
+- Add persistent ledger state for restart-safe usage reporting.
+- Support distributed circuit-breaker state across multiple proxy replicas.
+- Add production calibration tooling for timeout and drift-threshold derivation.
 
 ## Development, Testing & Chaos
 
