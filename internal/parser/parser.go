@@ -50,36 +50,57 @@ func (r *Reader) Next(ctx context.Context, deadline time.Duration) (Frame, error
 		err   error
 	}
 	ch := make(chan result, 1)
+	activity := make(chan struct{}, 1)
 	go func() {
-		frame, err := r.readFrame()
+		frame, err := r.readFrameWithActivity(activity)
 		ch <- result{frame: frame, err: err}
 	}()
 
 	timer := time.NewTimer(deadline)
 	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return Frame{}, ctx.Err()
-	case <-timer.C:
-		return Frame{}, ErrSilentHang
-	case res := <-ch:
-		if res.err == nil {
-			now := time.Now()
-			if !r.lastFrameAt.IsZero() && r.cal != nil {
-				r.cal.Sample("inter_token_gap", float64(now.Sub(r.lastFrameAt).Milliseconds()))
+	for {
+		select {
+		case <-ctx.Done():
+			return Frame{}, ctx.Err()
+		case <-timer.C:
+			return Frame{}, ErrSilentHang
+		case <-activity:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
-			r.lastFrameAt = now
+			timer.Reset(deadline)
+		case res := <-ch:
+			if res.err == nil {
+				now := time.Now()
+				if !r.lastFrameAt.IsZero() && r.cal != nil {
+					r.cal.Sample("inter_token_gap", float64(now.Sub(r.lastFrameAt).Milliseconds()))
+				}
+				r.lastFrameAt = now
+			}
+			return res.frame, res.err
 		}
-		return res.frame, res.err
 	}
 }
 
 func (r *Reader) readFrame() (Frame, error) {
+	return r.readFrameWithActivity(nil)
+}
+
+func (r *Reader) readFrameWithActivity(activity chan<- struct{}) (Frame, error) {
 	var buf bytes.Buffer
 	for {
-		line, err := r.br.ReadBytes('\n')
-		if len(line) > 0 {
-			buf.Write(line)
+		b, err := r.br.ReadByte()
+		if err == nil {
+			buf.WriteByte(b)
+			if activity != nil {
+				select {
+				case activity <- struct{}{}:
+				default:
+				}
+			}
 			if bytes.HasSuffix(buf.Bytes(), []byte("\n\n")) || bytes.HasSuffix(buf.Bytes(), []byte("\r\n\r\n")) {
 				return ParseFrameForProvider(buf.Bytes(), r.format)
 			}

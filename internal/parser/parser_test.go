@@ -9,11 +9,15 @@ import (
 
 type chunkedReader struct {
 	chunks [][]byte
+	delay  time.Duration
 }
 
 func (r *chunkedReader) Read(p []byte) (int, error) {
 	if len(r.chunks) == 0 {
 		return 0, io.EOF
+	}
+	if r.delay > 0 {
+		time.Sleep(r.delay)
 	}
 	chunk := r.chunks[0]
 	r.chunks = r.chunks[1:]
@@ -68,5 +72,21 @@ func TestAnthropicControlAndUsageFrames(t *testing.T) {
 	}
 	if done.Event != "done" {
 		t.Fatalf("event = %q, want done", done.Event)
+	}
+}
+
+func TestSilentHangDeadlineResetsOnEveryReceivedByte(t *testing.T) {
+	raw := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"héllo\"}}]}\n\n")
+	chunks := make([][]byte, 0, len(raw))
+	for _, b := range raw {
+		chunks = append(chunks, []byte{b})
+	}
+	r := &chunkedReader{chunks: chunks, delay: 10 * time.Millisecond}
+	frame, err := NewReader(r, nil).Next(context.Background(), 30*time.Millisecond)
+	if err != nil {
+		t.Fatalf("one-byte-at-a-time frame parsed with error: %v", err)
+	}
+	if frame.Text != "héllo" {
+		t.Fatalf("text = %q, want héllo", frame.Text)
 	}
 }

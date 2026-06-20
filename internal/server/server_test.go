@@ -2,11 +2,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +38,13 @@ func TestBillingWorkedExampleFailoverThenSuccess(t *testing.T) {
 	sum := srv.Ledger().Summary(auth.HashKey(raw), "sg_live_***")
 	if sum.TokensBilled != 80 {
 		t.Fatalf("tokens_billed = %d, want 80", sum.TokensBilled)
+	}
+	rec, ok := srv.auth.LookupRaw(raw)
+	if !ok {
+		t.Fatal("missing key record")
+	}
+	if got := atomic.LoadInt64(&rec.TokensUsed); got != 80 {
+		t.Fatalf("tokens_used = %d, want 80 after superseded attempt release", got)
 	}
 }
 
@@ -189,6 +199,7 @@ func TestOpenAIAdapterUsesNativeEndpointAndBearer(t *testing.T) {
 	cfg.OpenAIAPIKey = "openai-test-key"
 	cfg.Providers = []config.Provider{{Name: "openai", Type: "openai", Priority: 0, BaseURL: upstream.URL}}
 	srv := New(cfg, store)
+	srv.client = upstream.Client()
 
 	body := readAll(t, postStream(t, srv, raw).Body)
 	if !strings.Contains(body, "hello ") {
@@ -226,6 +237,7 @@ func TestAnthropicAdapterUsesNativeEndpointHeadersAndUsage(t *testing.T) {
 	cfg.AnthropicAPIKey = "anthropic-test-key"
 	cfg.Providers = []config.Provider{{Name: "anthropic", Type: "anthropic", Priority: 0, BaseURL: upstream.URL}}
 	srv := New(cfg, store)
+	srv.client = upstream.Client()
 
 	body := readAll(t, postStream(t, srv, raw).Body)
 	if !strings.Contains(body, "hello ") || !strings.Contains(body, "there") {
@@ -284,6 +296,47 @@ func TestUsageEndpointAggregatesSuccessAndTruncation(t *testing.T) {
 	}
 	if summary.TokensBilled != 7 || summary.TruncatedRequests != 1 || summary.DriftFlag {
 		t.Fatalf("bad usage summary: %+v", summary)
+	}
+}
+
+func TestConstantTimeEqualString(t *testing.T) {
+	if !constantTimeEqualString("sg_live_test", "sg_live_test") {
+		t.Fatal("matching values were rejected")
+	}
+	if constantTimeEqualString("sg_live_test", "sg_live_other") {
+		t.Fatal("different values were accepted")
+	}
+}
+
+type sequenceResolver struct {
+	addrs [][]net.IPAddr
+	calls int
+}
+
+func (r *sequenceResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	if r.calls >= len(r.addrs) {
+		return nil, nil
+	}
+	addrs := r.addrs[r.calls]
+	r.calls++
+	return addrs, nil
+}
+
+func TestValidatedDialAddressRejectsDNSRebinding(t *testing.T) {
+	resolver := &sequenceResolver{addrs: [][]net.IPAddr{
+		{{IP: net.ParseIP("198.51.100.10")}},
+		{{IP: net.ParseIP("127.0.0.1")}},
+	}}
+	first, err := validatedDialAddress(context.Background(), resolver, "provider.example:443", false)
+	if err != nil {
+		t.Fatalf("first resolution rejected: %v", err)
+	}
+	if first != "198.51.100.10:443" {
+		t.Fatalf("first dial address = %q, want 198.51.100.10:443", first)
+	}
+	_, err = validatedDialAddress(context.Background(), resolver, "provider.example:443", false)
+	if err == nil || !strings.Contains(err.Error(), "restricted address") {
+		t.Fatalf("expected restricted rebinding error, got %v", err)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"sort"
@@ -152,9 +154,8 @@ func (c Config) Validate() error {
 			return fmt.Errorf("duplicate provider priority %d", p.Priority)
 		}
 		priorities[p.Priority] = true
-		u, err := url.Parse(p.BaseURL)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return fmt.Errorf("provider %q base_url must be a valid URL", p.Name)
+		if err := validateProviderURL(p); err != nil {
+			return fmt.Errorf("provider %q base_url invalid: %w", p.Name, err)
 		}
 		if err := validateBreaker(c.BreakerConfigFor(p)); err != nil {
 			return fmt.Errorf("provider %q circuit breaker invalid: %w", p.Name, err)
@@ -165,6 +166,9 @@ func (c Config) Validate() error {
 	}
 	if c.RateLimit.WindowSeconds < 1 {
 		return errors.New("rate_limit.window_s must be >= 1")
+	}
+	if c.RateLimit.MaxTokens < 1 {
+		return errors.New("rate_limit.max_tokens must be >= 1")
 	}
 	if c.Reconciliation.Interval <= 0 {
 		return errors.New("reconciliation.interval must be > 0")
@@ -192,6 +196,48 @@ func validateBreaker(cfg breaker.Config) error {
 		return errors.New("circuit_breaker.half_open_success_threshold must be >= 1")
 	}
 	return nil
+}
+
+func validateProviderURL(p Provider) error {
+	u, err := url.Parse(p.BaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return errors.New("must be a valid URL")
+	}
+	if p.ProviderType() == "mock" {
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return errors.New("scheme must be http or https")
+		}
+		return nil
+	}
+	if u.Scheme != "https" {
+		return errors.New("scheme must be https")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("host is required")
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if restrictedUpstreamIP(ip) {
+			return errors.New("host resolves to a private, loopback, link-local, or unspecified address")
+		}
+		return nil
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("host lookup failed: %w", err)
+	}
+	for _, addr := range addrs {
+		ip, ok := netip.AddrFromSlice(addr)
+		if !ok || restrictedUpstreamIP(ip) {
+			return errors.New("host resolves to a private, loopback, link-local, or unspecified address")
+		}
+	}
+	return nil
+}
+
+func restrictedUpstreamIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 func parseFile(path string, cfg *Config) error {
