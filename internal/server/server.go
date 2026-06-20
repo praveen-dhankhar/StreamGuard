@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -407,7 +408,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	pathKey := strings.TrimPrefix(r.URL.Path, "/usage/")
 	rawKey, ok := bearer(r.Header.Get("Authorization"))
 	key, valid := s.auth.LookupRaw(rawKey)
-	if !ok || !valid || rawKey != pathKey {
+	if !ok || !valid || !constantTimeEqualString(rawKey, pathKey) {
 		writeError(w, http.StatusForbidden, "unauthorized", "usage requires matching API key")
 		return
 	}
@@ -420,7 +421,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, ok := bearer(r.Header.Get("Authorization"))
-	if !ok || raw != s.cfg.OperatorToken {
+	if !ok || !constantTimeEqualString(raw, s.cfg.OperatorToken) {
 		writeError(w, http.StatusForbidden, "unauthorized", "operator token required")
 		return
 	}
@@ -453,6 +454,10 @@ func bearer(v string) (string, bool) {
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(v, "Bearer "))
 	return token, token != ""
+}
+
+func constantTimeEqualString(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func flush(f http.Flusher) {

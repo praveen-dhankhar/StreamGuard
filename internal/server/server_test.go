@@ -295,6 +295,15 @@ func TestUsageEndpointAggregatesSuccessAndTruncation(t *testing.T) {
 	}
 }
 
+func TestConstantTimeEqualString(t *testing.T) {
+	if !constantTimeEqualString("sg_live_test", "sg_live_test") {
+		t.Fatal("matching values were rejected")
+	}
+	if constantTimeEqualString("sg_live_test", "sg_live_other") {
+		t.Fatal("different values were accepted")
+	}
+}
+
 func testServer(t *testing.T, p1URL, p2URL string, budget int64) (*Server, string) {
 	t.Helper()
 	raw := "sg_live_test"
