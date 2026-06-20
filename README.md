@@ -369,6 +369,27 @@ Measured chaos and calibration run:
 STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_enabled ./chaos -run TestHarnessRunsConcurrentChaosLoad -count=1 -v
 ```
 
+k6 stream latency load test:
+
+```sh
+go run ./cmd/demo-upstreams
+OPERATOR_TOKEN=dev-operator-token go run ./cmd/streamguard
+k6 run loadtests/k6_stream_p95_p99.js
+```
+
+Latest recorded local result: [2026-06-20 k6 p95/p99 run](./loadtests/results/k6_stream_p95_p99_2026-06-20.md).
+
+| Metric | Value |
+|---|---:|
+| Virtual users | `10` |
+| Duration | `30s` |
+| Completed streams | `190` |
+| Failed requests | `0` |
+| `http_req_duration` p95 | `825.41ms` |
+| `http_req_duration` p99 | `1.01s` |
+| p95 threshold | `<2500ms` passed |
+| p99 threshold | `<3500ms` passed |
+
 Default builds exclude the `chaos` package from the final binary:
 
 ```sh
