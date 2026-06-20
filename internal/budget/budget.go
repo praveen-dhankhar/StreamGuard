@@ -29,6 +29,22 @@ func (k *APIKeyRecord) TryReserve(n int64) bool {
 	}
 }
 
+func (k *APIKeyRecord) Release(n int64) {
+	if n <= 0 {
+		return
+	}
+	for {
+		used := atomic.LoadInt64(&k.TokensUsed)
+		next := used - n
+		if next < 0 {
+			next = 0
+		}
+		if atomic.CompareAndSwapInt64(&k.TokensUsed, used, next) {
+			return
+		}
+	}
+}
+
 func (k *APIKeyRecord) Exhausted() bool {
 	return atomic.LoadInt64(&k.TokensUsed) >= k.TokenBudget
 }

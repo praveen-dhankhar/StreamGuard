@@ -225,6 +225,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		active.session.FinishAttempt(attemptIndex, string(reason), result.tokens, time.Now())
 		if next, ok := nextAttemptableProvider(providers, i+1, s.breakers, claimedProbes); ok {
 			failovers++
+			key.Release(int64(result.tokens))
 			_ = protocol.WriteSSE(w, protocol.EventFailover, protocol.FailoverData{
 				Reason:                       reason,
 				TokensDeliveredBeforeFailure: result.tokens,
@@ -261,7 +262,10 @@ type attemptResult struct {
 var errBudgetExceeded = errors.New("budget_exceeded")
 var errForcedShutdown = errors.New("forced_shutdown")
 
-func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, body []byte, model string, p config.Provider, keyHash string, key interface{ TryReserve(int64) bool }, total *int) attemptResult {
+func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, body []byte, model string, p config.Provider, keyHash string, key interface {
+	TryReserve(int64) bool
+	Release(int64)
+}, total *int) attemptResult {
 	req, err := s.upstreamRequest(ctx, p, body, keyHash)
 	if err != nil {
 		return attemptResult{err: err}

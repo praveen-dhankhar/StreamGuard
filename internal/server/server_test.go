@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,13 @@ func TestBillingWorkedExampleFailoverThenSuccess(t *testing.T) {
 	sum := srv.Ledger().Summary(auth.HashKey(raw), "sg_live_***")
 	if sum.TokensBilled != 80 {
 		t.Fatalf("tokens_billed = %d, want 80", sum.TokensBilled)
+	}
+	rec, ok := srv.auth.LookupRaw(raw)
+	if !ok {
+		t.Fatal("missing key record")
+	}
+	if got := atomic.LoadInt64(&rec.TokensUsed); got != 80 {
+		t.Fatalf("tokens_used = %d, want 80 after superseded attempt release", got)
 	}
 }
 
