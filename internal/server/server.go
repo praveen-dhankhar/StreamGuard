@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +59,12 @@ type streamRequest struct {
 	Stream   bool            `json:"stream"`
 }
 
+type allowPrivateUpstreamKey struct{}
+
+type ipResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
 func New(cfg config.Config, keys *auth.Store) *Server {
 	breakers := make(map[string]*breaker.ProviderCircuitState)
 	registry := tokenizer.NewRegistry()
@@ -71,7 +79,7 @@ func New(cfg config.Config, keys *auth.Store) *Server {
 		cal:       calibration.New(),
 		tokenizer: tokenizer.NewProviderAwareCounter(registry),
 		breakers:  breakers,
-		client:    &http.Client{},
+		client:    &http.Client{Transport: newValidatedTransport(net.DefaultResolver)},
 		registry:  registry,
 		active:    make(map[string]*activeSession),
 	}
@@ -330,6 +338,9 @@ func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher 
 }
 
 func (s *Server) upstreamRequest(ctx context.Context, p config.Provider, body []byte, keyHash string) (*http.Request, error) {
+	if p.ProviderType() == "mock" {
+		ctx = context.WithValue(ctx, allowPrivateUpstreamKey{}, true)
+	}
 	base := strings.TrimRight(p.BaseURL, "/")
 	var url string
 	switch p.ProviderType() {
@@ -359,6 +370,60 @@ func (s *Server) upstreamRequest(ctx context.Context, p config.Provider, body []
 		req.Header.Set("X-StreamGuard-Key-Hash", keyHash)
 	}
 	return req, nil
+}
+
+func newValidatedTransport(resolver ipResolver) http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		allowPrivate, _ := ctx.Value(allowPrivateUpstreamKey{}).(bool)
+		validatedAddress, err := validatedDialAddress(ctx, resolver, address, allowPrivate)
+		if err != nil {
+			return nil, err
+		}
+		return dialer.DialContext(ctx, network, validatedAddress)
+	}
+	return transport
+}
+
+func validatedDialAddress(ctx context.Context, resolver ipResolver, address string, allowPrivate bool) (string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", err
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		if !allowPrivate && restrictedUpstreamIP(ip) {
+			return "", fmt.Errorf("upstream host %q resolved to restricted address %s", host, ip)
+		}
+		return net.JoinHostPort(ip.String(), port), nil
+	}
+	addrs, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("upstream host %q resolved to no addresses", host)
+	}
+	var first netip.Addr
+	for i, addr := range addrs {
+		ip, ok := netip.AddrFromSlice(addr.IP)
+		if !ok {
+			return "", fmt.Errorf("upstream host %q resolved to invalid address", host)
+		}
+		ip = ip.Unmap()
+		if i == 0 {
+			first = ip
+		}
+		if !allowPrivate && restrictedUpstreamIP(ip) {
+			return "", fmt.Errorf("upstream host %q resolved to restricted address %s", host, ip)
+		}
+	}
+	return net.JoinHostPort(first.String(), port), nil
+}
+
+func restrictedUpstreamIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 func (s *Server) allowedProviders(allow []string) []config.Provider {

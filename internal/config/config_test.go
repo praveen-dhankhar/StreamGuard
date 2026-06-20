@@ -59,7 +59,7 @@ func TestLoadParsesProviderType(t *testing.T) {
   - name: openai
     type: openai
     priority: 0
-    base_url: https://api.openai.com
+    base_url: https://198.51.100.10
 auth:
   keys_file: KEYS
 `, "KEYS", keys)
@@ -122,5 +122,56 @@ auth:
 	_, err := Load(cfg)
 	if err == nil || !strings.Contains(err.Error(), "rate_limit.max_tokens") {
 		t.Fatalf("expected invalid max_tokens error, got %v", err)
+	}
+}
+
+func TestLoadRejectsProductionProviderHTTPAndInternalHosts(t *testing.T) {
+	dir := t.TempDir()
+	keys := filepath.Join(dir, "keys.yaml")
+	if err := os.WriteFile(keys, []byte("keys:\n  - key: sg_live_test\n    provider_allowlist: [openai]\n    token_budget: 10\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name      string
+		provider  string
+		wantError string
+	}{
+		{
+			name: "http scheme",
+			provider: `providers:
+  - name: openai
+    type: openai
+    priority: 0
+    base_url: http://198.51.100.10
+auth:
+  keys_file: KEYS
+`,
+			wantError: "scheme must be https",
+		},
+		{
+			name: "loopback ip",
+			provider: `providers:
+  - name: openai
+    type: openai
+    priority: 0
+    base_url: https://127.0.0.1:8080
+auth:
+  keys_file: KEYS
+`,
+			wantError: "private, loopback",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "_")+".yaml")
+			body := strings.ReplaceAll(tc.provider, "KEYS", keys)
+			if err := os.WriteFile(cfg, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("expected %q error, got %v", tc.wantError, err)
+			}
+		})
 	}
 }
