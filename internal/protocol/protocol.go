@@ -51,6 +51,18 @@ type TruncatedData struct {
 	Final           bool            `json:"final"`
 }
 
+type contentPayload struct {
+	Choices []contentChoice `json:"choices"`
+}
+
+type contentChoice struct {
+	Delta contentDelta `json:"delta"`
+}
+
+type contentDelta struct {
+	Content string `json:"content"`
+}
+
 func ValidateFailoverReason(reason FailoverReason) bool {
 	switch reason {
 	case ReasonDeadSocket, ReasonSilentHang, ReasonMalformed:
@@ -79,9 +91,9 @@ func WriteSSE(w io.Writer, event string, data any) error {
 }
 
 func WriteContent(w io.Writer, text string) error {
-	b, err := json.Marshal(map[string]any{
-		"choices": []map[string]any{{
-			"delta": map[string]string{"content": text},
+	b, err := json.Marshal(contentPayload{
+		Choices: []contentChoice{{
+			Delta: contentDelta{Content: text},
 		}},
 	})
 	if err != nil {
