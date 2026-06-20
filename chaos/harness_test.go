@@ -4,8 +4,18 @@ package chaos
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
+
+func TestHarnessRequiresRuntimeGate(t *testing.T) {
+	t.Setenv("STREAMGUARD_CHAOS_ENABLED", "")
+
+	_, err := Run(context.Background(), Config{Streams: 50})
+	if err == nil || !strings.Contains(err.Error(), "STREAMGUARD_CHAOS_ENABLED=true") {
+		t.Fatalf("expected runtime gate error, got %v", err)
+	}
+}
 
 func TestHarnessRunsConcurrentChaosLoad(t *testing.T) {
 	t.Setenv("STREAMGUARD_CHAOS_ENABLED", "true")
@@ -23,6 +33,9 @@ func TestHarnessRunsConcurrentChaosLoad(t *testing.T) {
 	}
 	if result.Failures["dead_socket"] == 0 || result.Failures["silent_hang"] == 0 || result.Failures["malformed"] == 0 {
 		t.Fatalf("expected all failure modes to be exercised, got %+v", result.Failures)
+	}
+	if result.DetectionMS["dead_socket"] <= 0 || result.DetectionMS["silent_hang"] <= 0 || result.DetectionMS["malformed"] <= 0 {
+		t.Fatalf("expected measured detection timings for all failure modes, got %+v", result.DetectionMS)
 	}
 	if result.InterTokenGapSamples < 1000 {
 		t.Fatalf("expected at least 1000 inter-token-gap samples, got %d", result.InterTokenGapSamples)

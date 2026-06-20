@@ -47,3 +47,54 @@ shutdown:
 		t.Fatalf("expected duplicate priority error, got %v", err)
 	}
 }
+
+func TestLoadParsesProviderType(t *testing.T) {
+	dir := t.TempDir()
+	keys := filepath.Join(dir, "keys.yaml")
+	if err := os.WriteFile(keys, []byte("keys:\n  - key: sg_live_test\n    provider_allowlist: [openai]\n    token_budget: 10\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "config.yaml")
+	body := strings.ReplaceAll(`providers:
+  - name: openai
+    type: openai
+    priority: 0
+    base_url: https://api.openai.com
+auth:
+  keys_file: KEYS
+`, "KEYS", keys)
+	if err := os.WriteFile(cfg, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Providers[0].ProviderType(); got != "openai" {
+		t.Fatalf("provider type = %q, want openai", got)
+	}
+}
+
+func TestLoadRejectsInvalidProviderType(t *testing.T) {
+	dir := t.TempDir()
+	keys := filepath.Join(dir, "keys.yaml")
+	if err := os.WriteFile(keys, []byte("keys:\n  - key: sg_live_test\n    provider_allowlist: [openai]\n    token_budget: 10\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "config.yaml")
+	body := strings.ReplaceAll(`providers:
+  - name: openai
+    type: browser
+    priority: 0
+    base_url: https://api.openai.com
+auth:
+  keys_file: KEYS
+`, "KEYS", keys)
+	if err := os.WriteFile(cfg, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfg)
+	if err == nil || !strings.Contains(err.Error(), "type must be mock, openai, or anthropic") {
+		t.Fatalf("expected invalid provider type error, got %v", err)
+	}
+}

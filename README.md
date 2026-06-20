@@ -132,6 +132,7 @@ flowchart TB
 ## Core Capabilities
 
 - `POST /v1/stream` proxies SSE traffic and replays the original request body byte-for-byte during failover.
+- Provider adapters support deterministic `mock` upstreams, OpenAI chat-completion streaming, and Anthropic Messages streaming via explicit provider `type`.
 - `GET /usage/{key}` exposes authenticated, per-key usage totals aggregated across billing periods.
 - `GET /healthz` returns operator-only liveness and circuit-breaker state; `GET /livez` returns unauthenticated liveness only.
 - The reference client renders retained partial output, regeneration state, provider changes, and terminal truncation notices in a CLI surface.
@@ -172,7 +173,7 @@ The server listens on `:8080` by default. Override the bind address explicitly w
 STREAMGUARD_ADDR=:9090 OPERATOR_TOKEN=dev-operator-token go run ./cmd/streamguard
 ```
 
-The committed `config.yaml` points at `http://127.0.0.1:9001` and `http://127.0.0.1:9002`.
+The committed `config.yaml` points at `type: mock` providers on `http://127.0.0.1:9001` and `http://127.0.0.1:9002`.
 
 Release notes: [v1.0.1](./docs/releases/v1.0.1.md)
 
@@ -276,6 +277,7 @@ Calibration evidence from `STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_en
 - `1160` `inter_token_gap` samples
 - `120` `drift` samples
 - failure coverage across `dead_socket`, `silent_hang`, and `malformed`
+- measured detection timings: `dead_socket` 43.19ms, `malformed` 42.02ms, `silent_hang` 57.40ms
 - expected billed tokens `904`, actual ledger total `904`
 
 ## Architectural Notes
@@ -291,6 +293,8 @@ Calibration evidence from `STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_en
 **Exclusive Half-open Probing:** Circuit-breaker half-open probes are claimed atomically under a write lock so exactly one concurrent request becomes the probe.
 
 **Calibration-grade Mocking:** The mock upstream injects jitter and configurable usage drift so timeout and reconciliation calibration inputs remain non-degenerate.
+
+**Provider-native Streaming:** `type: openai` sends requests to `/v1/chat/completions` with bearer auth; `type: anthropic` sends requests to `/v1/messages` with `x-api-key` and `anthropic-version`.
 
 **Cross-period Usage Aggregation:** `/usage/{key}` aggregates token billing, truncation counts, drift flags, and reconciliation timestamps across all billing periods for that key.
 
@@ -316,7 +320,7 @@ Calibration evidence from `STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_en
 ## Known Limitations
 
 - State is in process only; restart loses breaker, ledger, and budget runtime state.
-- The mock harness uses a deterministic chunk counter path by design; runtime OpenAI counting uses `tiktoken-go`, while Anthropic counting currently uses a pinned local fallback encoding rather than a live count-tokens integration.
+- The mock harness uses a deterministic chunk counter path by design. Runtime OpenAI counting uses `tiktoken-go`; runtime Anthropic final billing uses streamed `message_delta.usage.output_tokens` when Anthropic provides it.
 - Calibration values were bootstrapped from the mock chaos harness, not production traffic. Recalibrate against real traffic before production rollout.
 - Reconciliation is batch and in memory. It is scheduled in-process and remains single-instance only.
 - Forced shutdown records partial final-attempt billing and truncation in the in-memory ledger, but does not emit a distinct shutdown-specific SSE reason.
@@ -326,7 +330,6 @@ Calibration evidence from `STREAMGUARD_CHAOS_ENABLED=true go test -tags chaos_en
 
 ## Roadmap
 
-- Add opt-in Anthropic live token-count verification to replace the current fallback strategy.
 - Add persistent ledger state for restart-safe usage reporting.
 - Support distributed circuit-breaker state across multiple proxy replicas.
 - Add production calibration tooling for timeout and drift-threshold derivation.

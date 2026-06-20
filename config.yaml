@@ -5,9 +5,11 @@ circuit_breaker:
 
 providers:
   - name: openai
+    type: mock
     priority: 0
     base_url: http://127.0.0.1:9001
   - name: anthropic
+    type: mock
     priority: 1
     base_url: http://127.0.0.1:9002
     circuit_breaker:

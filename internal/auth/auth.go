@@ -2,12 +2,15 @@ package auth
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"streamguard/internal/budget"
@@ -85,6 +88,44 @@ func (s *Store) LookupHash(hash string) (*budget.APIKeyRecord, bool) {
 	return rec, ok
 }
 
+func (s *Store) ResetExpired(now time.Time) int {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reset := 0
+	for _, rec := range s.byHash {
+		if rec.BudgetPeriod <= 0 {
+			continue
+		}
+		if now.Before(rec.BudgetPeriodStart.Add(rec.BudgetPeriod)) {
+			continue
+		}
+		atomic.StoreInt64(&rec.TokensUsed, 0)
+		rec.BudgetPeriodStart = now
+		reset++
+	}
+	return reset
+}
+
+func (s *Store) RunBudgetResetter(ctx context.Context, interval time.Duration) {
+	if interval <= 0 || interval > time.Minute {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			s.ResetExpired(now)
+		}
+	}
+}
+
 func (s *Store) LoadKeysFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -127,7 +168,11 @@ func (s *Store) LoadKeysFile(path string) error {
 		case "provider_allowlist":
 			allowlist = parseList(val)
 		case "token_budget":
-			tokenBudget = parseInt64(val)
+			n, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+			if err != nil {
+				return err
+			}
+			tokenBudget = n
 		case "budget_period":
 			d, err := time.ParseDuration(val)
 			if err != nil {
@@ -157,14 +202,4 @@ func parseList(v string) []string {
 		}
 	}
 	return out
-}
-
-func parseInt64(v string) int64 {
-	var n int64
-	for _, r := range strings.TrimSpace(v) {
-		if r >= '0' && r <= '9' {
-			n = n*10 + int64(r-'0')
-		}
-	}
-	return n
 }

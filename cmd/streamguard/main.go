@@ -68,6 +68,7 @@ func main() {
 			}
 		}
 	}()
+	go keys.RunBudgetResetter(runCtx, time.Minute)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)

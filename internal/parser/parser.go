@@ -18,19 +18,30 @@ var ErrMalformed = errors.New("malformed")
 var ErrSilentHang = errors.New("silent_hang")
 
 type Frame struct {
-	Event string
-	Data  []byte
-	Text  string
+	Event       string
+	Data        []byte
+	Text        string
+	UsageTokens int
+	HasUsage    bool
 }
 
 type Reader struct {
 	br          *bufio.Reader
 	cal         *calibration.Logger
 	lastFrameAt time.Time
+	format      string
 }
 
 func NewReader(r io.Reader, cal *calibration.Logger) *Reader {
-	return &Reader{br: bufio.NewReader(r), cal: cal}
+	return NewReaderForProvider(r, cal, "openai")
+}
+
+func NewReaderForProvider(r io.Reader, cal *calibration.Logger, format string) *Reader {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" || format == "mock" {
+		format = "openai"
+	}
+	return &Reader{br: bufio.NewReader(r), cal: cal, format: format}
 }
 
 func (r *Reader) Next(ctx context.Context, deadline time.Duration) (Frame, error) {
@@ -70,12 +81,12 @@ func (r *Reader) readFrame() (Frame, error) {
 		if len(line) > 0 {
 			buf.Write(line)
 			if bytes.HasSuffix(buf.Bytes(), []byte("\n\n")) || bytes.HasSuffix(buf.Bytes(), []byte("\r\n\r\n")) {
-				return ParseFrame(buf.Bytes())
+				return ParseFrameForProvider(buf.Bytes(), r.format)
 			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) && buf.Len() > 0 {
-				return ParseFrame(buf.Bytes())
+				return ParseFrameForProvider(buf.Bytes(), r.format)
 			}
 			return Frame{}, err
 		}
@@ -83,6 +94,10 @@ func (r *Reader) readFrame() (Frame, error) {
 }
 
 func ParseFrame(raw []byte) (Frame, error) {
+	return ParseFrameForProvider(raw, "openai")
+}
+
+func ParseFrameForProvider(raw []byte, format string) (Frame, error) {
 	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
 	var frame Frame
 	var data []string
@@ -102,6 +117,10 @@ func ParseFrame(raw []byte) (Frame, error) {
 		frame.Event = "done"
 		return frame, nil
 	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "anthropic" {
+		return parseAnthropicFrame(frame)
+	}
 	if frame.Event == "" {
 		text, err := extractContent(frame.Data)
 		if err != nil {
@@ -114,6 +133,49 @@ func ParseFrame(raw []byte) (Frame, error) {
 		return Frame{}, ErrMalformed
 	}
 	return frame, nil
+}
+
+func parseAnthropicFrame(frame Frame) (Frame, error) {
+	switch frame.Event {
+	case "content_block_delta":
+		var payload struct {
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal(frame.Data, &payload); err != nil {
+			return Frame{}, ErrMalformed
+		}
+		if payload.Delta.Type == "text_delta" {
+			frame.Event = ""
+			frame.Text = payload.Delta.Text
+		}
+		return frame, nil
+	case "message_delta":
+		var payload struct {
+			Usage struct {
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(frame.Data, &payload); err != nil {
+			return Frame{}, ErrMalformed
+		}
+		if payload.Usage.OutputTokens > 0 {
+			frame.UsageTokens = payload.Usage.OutputTokens
+			frame.HasUsage = true
+		}
+		return frame, nil
+	case "message_stop":
+		frame.Event = "done"
+		return frame, nil
+	case "error":
+		return Frame{}, ErrMalformed
+	case "message_start", "content_block_start", "content_block_stop", "ping":
+		return frame, nil
+	default:
+		return frame, nil
+	}
 }
 
 func extractContent(data []byte) (string, error) {

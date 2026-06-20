@@ -26,9 +26,8 @@ func (ChunkCounter) Count(_ string, _ string, _ string, text string) int {
 }
 
 type ProviderAwareCounter struct {
-	openAI    *OpenAICounter
-	anthropic *AnthropicCounter
-	fallback  ChunkCounter
+	openAI   *OpenAICounter
+	fallback ChunkCounter
 }
 
 type OpenAICounter struct {
@@ -36,24 +35,13 @@ type OpenAICounter struct {
 	cache map[string]*tiktoken.Tiktoken
 }
 
-type AnthropicCounter struct {
-	encoding *tiktoken.Tiktoken
-}
-
 func NewProviderAwareCounter(reg *Registry) Counter {
 	if reg != nil {
 		reg.Register("openai", "tiktoken-go")
-		reg.Register("anthropic", "cl100k-base-fallback")
-	}
-	encoding, err := tiktoken.GetEncoding("cl100k_base")
-	if err != nil {
-		encoding = nil
+		reg.Register("anthropic", "stream-usage-output-tokens")
 	}
 	return &ProviderAwareCounter{
-		openAI: &OpenAICounter{cache: make(map[string]*tiktoken.Tiktoken)},
-		anthropic: &AnthropicCounter{
-			encoding: encoding,
-		},
+		openAI:   &OpenAICounter{cache: make(map[string]*tiktoken.Tiktoken)},
 		fallback: ChunkCounter{},
 	}
 }
@@ -67,7 +55,7 @@ func (c *ProviderAwareCounter) Count(provider, model, hint, text string) int {
 	case strings.Contains(name, "openai"):
 		return c.openAI.Count(provider, model, hint, text)
 	case strings.Contains(name, "anthropic"):
-		return c.anthropic.Count(provider, model, hint, text)
+		return c.fallback.Count(provider, model, hint, text)
 	default:
 		return c.fallback.Count(provider, model, hint, text)
 	}
@@ -103,16 +91,6 @@ func (c *OpenAICounter) encodingForModel(model string) *tiktoken.Tiktoken {
 	}
 	c.cache[key] = enc
 	return enc
-}
-
-func (c *AnthropicCounter) Count(_ string, _ string, _ string, text string) int {
-	if text == "" {
-		return 0
-	}
-	if c.encoding == nil {
-		return ChunkCounter{}.Count("", "", "", text)
-	}
-	return len(c.encoding.Encode(text, nil, nil))
 }
 
 type Registry struct {

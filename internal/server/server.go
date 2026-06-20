@@ -168,18 +168,19 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	truncated := false
 	truncatedReason := protocol.ReasonAllProvidersExhausted
 	attempted := 0
+	claimedProbes := map[string]bool{}
 	active.session.Status = cascade.StatusStreaming
 
 	for i, p := range providers {
 		br := s.breakers[p.Name]
-		allowed := br.State() == breaker.Closed
+		allowed := claimedProbes[p.Name]
+		if allowed {
+			delete(claimedProbes, p.Name)
+		} else {
+			allowed = br.AllowAttempt()
+		}
 		if !allowed {
-			if br.State() == breaker.HalfOpen {
-				allowed = br.TryClaimProbe()
-			}
-			if !allowed {
-				continue
-			}
+			continue
 		}
 		attempted++
 		attemptIndex := active.session.StartAttempt(p.Name, time.Now())
@@ -210,18 +211,19 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			active.session.FinishAttempt(attemptIndex, "client_cancelled", result.tokens, time.Now())
 			return
 		}
-		br.RecordFailure()
 		if errors.Is(result.err, errBudgetExceeded) {
+			br.RecordSuccess()
 			truncated = true
 			truncatedReason = protocol.ReasonBudgetExceeded
 			active.session.Status = cascade.StatusTruncated
 			active.session.FinishAttempt(attemptIndex, "budget_exceeded", result.tokens, time.Now())
 			break
 		}
+		br.RecordFailure()
 		reason := classify(result.err)
 		active.session.Status = cascade.StatusFailover
 		active.session.FinishAttempt(attemptIndex, string(reason), result.tokens, time.Now())
-		if next, ok := nextAllowedProvider(providers, i+1, s.breakers); ok {
+		if next, ok := nextAttemptableProvider(providers, i+1, s.breakers, claimedProbes); ok {
 			failovers++
 			_ = protocol.WriteSSE(w, protocol.EventFailover, protocol.FailoverData{
 				Reason:                       reason,
@@ -260,13 +262,10 @@ var errBudgetExceeded = errors.New("budget_exceeded")
 var errForcedShutdown = errors.New("forced_shutdown")
 
 func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, body []byte, model string, p config.Provider, keyHash string, key interface{ TryReserve(int64) bool }, total *int) attemptResult {
-	url := strings.TrimRight(p.BaseURL, "/") + "/v1/stream"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := s.upstreamRequest(ctx, p, body, keyHash)
 	if err != nil {
 		return attemptResult{err: err}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-StreamGuard-Key-Hash", keyHash)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), errForcedShutdown) {
@@ -279,7 +278,7 @@ func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher 
 		return attemptResult{err: parser.ErrMalformed}
 	}
 	tokenizerHint := resp.Header.Get("X-StreamGuard-Tokenizer")
-	pr := parser.NewReader(resp.Body, s.cal)
+	pr := parser.NewReaderForProvider(resp.Body, s.cal, p.ProviderType())
 	deadline := time.Duration(s.cfg.Timeouts.SilentHangDeadlineMS) * time.Millisecond
 	var attemptTokens int
 	for {
@@ -292,6 +291,18 @@ func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher 
 		}
 		if frame.Event == "done" {
 			return attemptResult{tokens: attemptTokens}
+		}
+		if frame.HasUsage {
+			delta := frame.UsageTokens - attemptTokens
+			if delta > 0 {
+				if !key.TryReserve(int64(delta)) {
+					return attemptResult{tokens: attemptTokens, err: errBudgetExceeded}
+				}
+				s.limit.Add(keyHash, int64(delta), time.Now())
+			}
+			*total += delta
+			attemptTokens = frame.UsageTokens
+			continue
 		}
 		if frame.Event != "" {
 			continue
@@ -313,6 +324,38 @@ func (s *Server) runAttempt(ctx context.Context, w http.ResponseWriter, flusher 
 	}
 }
 
+func (s *Server) upstreamRequest(ctx context.Context, p config.Provider, body []byte, keyHash string) (*http.Request, error) {
+	base := strings.TrimRight(p.BaseURL, "/")
+	var url string
+	switch p.ProviderType() {
+	case "openai":
+		url = base + "/v1/chat/completions"
+	case "anthropic":
+		url = base + "/v1/messages"
+	default:
+		url = base + "/v1/stream"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	switch p.ProviderType() {
+	case "openai":
+		if s.cfg.OpenAIAPIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+s.cfg.OpenAIAPIKey)
+		}
+	case "anthropic":
+		if s.cfg.AnthropicAPIKey != "" {
+			req.Header.Set("x-api-key", s.cfg.AnthropicAPIKey)
+		}
+		req.Header.Set("anthropic-version", "2023-06-01")
+	default:
+		req.Header.Set("X-StreamGuard-Key-Hash", keyHash)
+	}
+	return req, nil
+}
+
 func (s *Server) allowedProviders(allow []string) []config.Provider {
 	out := make([]config.Provider, 0, len(s.cfg.Providers))
 	for _, p := range s.cfg.Providers {
@@ -326,10 +369,17 @@ func (s *Server) allowedProviders(allow []string) []config.Provider {
 	return out
 }
 
-func nextAllowedProvider(providers []config.Provider, start int, breakers map[string]*breaker.ProviderCircuitState) (config.Provider, bool) {
+func nextAttemptableProvider(providers []config.Provider, start int, breakers map[string]*breaker.ProviderCircuitState, claimedProbes map[string]bool) (config.Provider, bool) {
 	for i := start; i < len(providers); i++ {
-		if breakers[providers[i].Name].State() != breaker.Open {
+		br := breakers[providers[i].Name]
+		switch br.State() {
+		case breaker.Closed:
 			return providers[i], true
+		case breaker.HalfOpen:
+			if br.TryClaimProbe() {
+				claimedProbes[providers[i].Name] = true
+				return providers[i], true
+			}
 		}
 	}
 	return config.Provider{}, false

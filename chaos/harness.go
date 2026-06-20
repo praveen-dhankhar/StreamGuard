@@ -53,6 +53,7 @@ type Result struct {
 	DriftRawPct          float64
 	DriftFinalPct        float64
 	DriftClamped         bool
+	DetectionMS          map[string]float64
 }
 
 type scenario struct {
@@ -139,6 +140,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 
 	var expectedBilled atomic.Int64
 	failures := map[string]int{}
+	detectionSums := map[string]int64{}
+	detectionCounts := map[string]int{}
 	var failuresMu sync.Mutex
 	var wg sync.WaitGroup
 	errs := make(chan error, cfg.Streams)
@@ -149,15 +152,19 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			started := time.Now()
 			body, err := invokeStream(ctx, ts.URL, key, selected.model)
 			if err != nil {
 				errs <- err
 				return
 			}
+			elapsed := time.Since(started)
 			for _, failure := range []string{"dead_socket", "silent_hang", "malformed"} {
 				if strings.Contains(body, `"reason":"`+failure+`"`) {
 					failuresMu.Lock()
 					failures[failure]++
+					detectionSums[failure] += elapsed.Nanoseconds()
+					detectionCounts[failure]++
 					failuresMu.Unlock()
 				}
 			}
@@ -195,6 +202,12 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	sum := srv.Ledger().Summary(auth.HashKey(key), auth.Redact(key))
 	silentHang, _ := srv.Calibration().SilentHangDeadline(5)
 	drift, _ := srv.Calibration().DriftThreshold()
+	detectionMS := make(map[string]float64, len(detectionSums))
+	for failure, sum := range detectionSums {
+		if detectionCounts[failure] > 0 {
+			detectionMS[failure] = float64(sum) / float64(detectionCounts[failure]) / float64(time.Millisecond)
+		}
+	}
 	return Result{
 		Streams:              cfg.Streams,
 		ExpectedBilled:       int(expectedBilled.Load()),
@@ -211,6 +224,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		DriftRawPct:          drift.Raw,
 		DriftFinalPct:        drift.Final,
 		DriftClamped:         drift.Clamped,
+		DetectionMS:          detectionMS,
 	}, nil
 }
 

@@ -36,9 +36,18 @@ type BreakerConfig struct {
 
 type Provider struct {
 	Name           string
+	Type           string
 	Priority       int
 	BaseURL        string
 	CircuitBreaker *BreakerConfig
+}
+
+func (p Provider) ProviderType() string {
+	typ := strings.ToLower(strings.TrimSpace(p.Type))
+	if typ == "" {
+		return "mock"
+	}
+	return typ
 }
 
 type Timeouts struct {
@@ -131,6 +140,11 @@ func (c Config) Validate() error {
 			return fmt.Errorf("duplicate provider name %q", p.Name)
 		}
 		names[p.Name] = true
+		switch p.ProviderType() {
+		case "mock", "openai", "anthropic":
+		default:
+			return fmt.Errorf("provider %q type must be mock, openai, or anthropic", p.Name)
+		}
 		if p.Priority < 0 {
 			return fmt.Errorf("provider %q priority cannot be negative", p.Name)
 		}
@@ -230,6 +244,8 @@ func parseFile(path string, cfg *Config) error {
 			switch key {
 			case "name":
 				currentProvider.Name = val
+			case "type":
+				currentProvider.Type = val
 			case "priority":
 				currentProvider.Priority = atoi(val)
 			case "base_url":
