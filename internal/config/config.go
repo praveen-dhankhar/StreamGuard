@@ -166,6 +166,9 @@ func (c Config) Validate() error {
 	if c.RateLimit.WindowSeconds < 1 {
 		return errors.New("rate_limit.window_s must be >= 1")
 	}
+	if c.RateLimit.MaxTokens < 1 {
+		return errors.New("rate_limit.max_tokens must be >= 1")
+	}
 	if c.Reconciliation.Interval <= 0 {
 		return errors.New("reconciliation.interval must be > 0")
 	}

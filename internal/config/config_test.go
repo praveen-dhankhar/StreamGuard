@@ -98,3 +98,29 @@ auth:
 		t.Fatalf("expected invalid provider type error, got %v", err)
 	}
 }
+
+func TestLoadRejectsInvalidRateLimitMaxTokens(t *testing.T) {
+	dir := t.TempDir()
+	keys := filepath.Join(dir, "keys.yaml")
+	if err := os.WriteFile(keys, []byte("keys:\n  - key: sg_live_test\n    provider_allowlist: [openai]\n    token_budget: 10\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "config.yaml")
+	body := strings.ReplaceAll(`providers:
+  - name: openai
+    priority: 0
+    base_url: http://127.0.0.1:9001
+rate_limit:
+  window_s: 60
+  max_tokens: 0
+auth:
+  keys_file: KEYS
+`, "KEYS", keys)
+	if err := os.WriteFile(cfg, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfg)
+	if err == nil || !strings.Contains(err.Error(), "rate_limit.max_tokens") {
+		t.Fatalf("expected invalid max_tokens error, got %v", err)
+	}
+}
